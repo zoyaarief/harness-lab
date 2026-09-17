@@ -1,0 +1,4 @@
+# Tool-design ablation: no view/edit tools, only bash (like mini-swe-agent).
+variant: bash-only
+context_strategy: full
+tool_set: bash

@@ -1,0 +1,5 @@
+# Cap each tool output to 2,000 chars when it is added. History is never rewritten.
+variant: truncate
+context_strategy: truncate
+tool_set: bash+edit
+truncate_obs_chars: 2000

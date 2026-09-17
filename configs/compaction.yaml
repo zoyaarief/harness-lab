@@ -1,0 +1,5 @@
+# Keep everything until the prompt passes ~12k tokens, then replace history with a summary.
+variant: compaction
+context_strategy: compaction
+tool_set: bash+edit
+compaction_threshold_tokens: 12000

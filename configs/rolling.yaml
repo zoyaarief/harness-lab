@@ -1,0 +1,6 @@
+# Show only the last 3 tool outputs in full; older ones are elided on every call.
+# Smaller prompts, but the prompt prefix changes each turn, so the KV cache misses.
+variant: rolling
+context_strategy: rolling
+tool_set: bash+edit
+rolling_keep_last: 3

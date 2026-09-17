@@ -1,0 +1,4 @@
+# Baseline: keep the whole conversation. Cache-friendly, largest prompts.
+variant: full
+context_strategy: full
+tool_set: bash+edit
