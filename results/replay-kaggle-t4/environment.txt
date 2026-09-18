@@ -1,0 +1,4 @@
+GPU: Tesla T4, 15360 MiB, 7.5
+Tesla T4, 15360 MiB, 7.5
+model: Qwen/Qwen3-1.7B
+max_model_len: 32768
