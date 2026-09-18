@@ -1,0 +1,5 @@
+# Ablation: the full-history harness without the repeated-call warning.
+variant: no-repeat-guard
+context_strategy: full
+tool_set: bash+edit
+repeat_warning_after: 0

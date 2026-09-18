@@ -74,5 +74,21 @@ async def test_view_file_numbers_lines(runner, tmp_path):
     (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(1, 11)))
     result = await runner.call("view_file", json.dumps({"path": "f.txt", "start_line": 3, "end_line": 4}))
     assert result.output.split("\n")[:2] == ["     3\tline 3", "     4\tline 4"]
-    missing = await runner.call("view_file", json.dumps({"path": "nope.txt"}))
-    assert "file not found" in missing.output
+    missing = await runner.call("view_file", json.dumps({"path": "pkg/nope.py"}))
+    assert missing.error and "does not exist" in missing.output
+
+
+async def test_view_file_on_directory_lists_it(runner, tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "validator.py").write_text("x = 1\n")
+    result = await runner.call("view_file", json.dumps({"path": "pkg"}))
+    assert result.error
+    assert result.output.startswith("Error: pkg is a directory")
+    assert "validator.py" in result.output
+
+
+async def test_view_file_missing_lists_parent(runner, tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "validator.py").write_text("x = 1\n")
+    result = await runner.call("view_file", json.dumps({"path": "pkg/schema_check.py"}))
+    assert "does not exist" in result.output and "validator.py" in result.output

@@ -1,6 +1,7 @@
 """The agent loop: prompt -> model -> tool calls -> observations -> repeat."""
 
 import json
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -8,7 +9,7 @@ import httpx
 
 from harness_lab.config import HarnessConfig
 from harness_lab.context import COMPACTION_PROMPT, make_strategy
-from harness_lab.llm import CallStats, ContextOverflowError, LLMClient
+from harness_lab.llm import CallStats, ContextOverflowError, LLMClient, RetryableStreamError
 from harness_lab.tools import Executor, ToolRunner, tool_specs
 from harness_lab.tracing import Tracer
 
@@ -25,6 +26,19 @@ How to work:
 
 NUDGE = "You did not call a tool. Call a tool to continue, or call `submit` if the task is complete."
 
+REPEAT_WARNING = (
+    "\n\n[harness] You have now made this exact `{name}` call {count} times. Repeating it will not "
+    "give a different result. Change your approach: look at other files, list directories, "
+    "or re-read the task."
+)
+
+
+def call_signature(name: str, arguments: str) -> tuple[str, str]:
+    try:
+        return name, json.dumps(json.loads(arguments), sort_keys=True)
+    except (json.JSONDecodeError, TypeError):
+        return name, arguments.strip()
+
 
 @dataclass
 class RunTotals:
@@ -39,6 +53,7 @@ class RunTotals:
     tool_errors: int = 0
     format_errors: int = 0
     compactions: int = 0
+    repeat_warnings: int = 0
 
     def add_call(self, stats: CallStats) -> None:
         self.llm_calls += 1
@@ -87,6 +102,7 @@ async def run_agent(
     runner = ToolRunner(executor, cfg.tool_set, cfg.command_timeout_sec)
     estimator = TokenEstimator(tools)
     totals = RunTotals()
+    call_counts: Counter[tuple[str, str]] = Counter()
 
     # A config can set a key to null to drop it for providers that reject it.
     extra_body = {"chat_template_kwargs": {"enable_thinking": cfg.reasoning}, **cfg.extra_body}
@@ -174,6 +190,13 @@ async def run_agent(
                 totals.tool_errors += int(result.error)
                 totals.tool_time_ms += result.duration_ms
                 observation = strategy.format_observation(result.output)
+                signature = call_signature(tc.name, tc.arguments)
+                call_counts[signature] += 1
+                repeats = call_counts[signature]
+                if cfg.repeat_warning_after and repeats >= cfg.repeat_warning_after and not result.submitted:
+                    # Appended when the message is created, so history is never rewritten.
+                    observation += REPEAT_WARNING.format(name=tc.name, count=repeats)
+                    totals.repeat_warnings += 1
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": observation})
                 tracer.write(
                     {
@@ -186,6 +209,7 @@ async def run_agent(
                         "duration_ms": result.duration_ms,
                         "output_chars": len(result.output),
                         "observation_chars": len(observation),
+                        "repeat_count": repeats,
                     }
                 )
                 submitted = submitted or result.submitted
@@ -194,5 +218,5 @@ async def run_agent(
         return finish("max_steps", step)
     except ContextOverflowError as exc:
         return finish("context_overflow", step, str(exc)[:500])
-    except (httpx.HTTPError, RuntimeError) as exc:
+    except (httpx.HTTPError, RuntimeError, RetryableStreamError) as exc:
         return finish("llm_error", step, f"{type(exc).__name__}: {exc}"[:500])

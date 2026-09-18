@@ -79,3 +79,30 @@ async def test_retries_on_rate_limit(monkeypatch):
 
     response = await client_for(handler).chat([])
     assert response.content == "ok" and response.stats.retries == 1
+
+
+async def test_retries_on_overload_reported_inside_the_stream(monkeypatch):
+    calls = []
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr("harness_lab.llm.asyncio.sleep", no_sleep)
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            error = {"error": {"message": "Service temporarily overloaded", "code": 503}}
+            return httpx.Response(200, content=sse(error))
+        return httpx.Response(200, content=sse({"choices": [{"delta": {"content": "ok"}}]}))
+
+    response = await client_for(handler).chat([])
+    assert response.content == "ok" and response.stats.retries == 1
+
+
+async def test_other_stream_errors_are_not_retried():
+    def handler(request):
+        return httpx.Response(200, content=sse({"error": {"message": "bad tool schema", "code": 400}}))
+
+    with pytest.raises(RuntimeError, match="bad tool schema"):
+        await client_for(handler).chat([])

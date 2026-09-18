@@ -1,0 +1,9 @@
+# Same variant, run against Nemotron 3 Super on the NVIDIA API catalog with reasoning on.
+variant: truncate
+context_strategy: truncate
+tool_set: bash+edit
+truncate_obs_chars: 2000
+reasoning: true
+max_output_tokens: 4096
+temperature: 0.6
+top_p: 0.95

@@ -54,7 +54,7 @@ BASH = _fn(
 )
 VIEW_FILE = _fn(
     "view_file",
-    "Show a file with line numbers.",
+    "Show a file with line numbers. For a directory or a missing path, lists what is there instead.",
     {
         "path": {"type": "string"},
         "start_line": {"type": "integer", "description": "First line to show (default 1)."},
@@ -146,7 +146,13 @@ class ToolRunner:
             start = max(1, int(args.get("start_line") or 1))
             end = int(args.get("end_line") or start + 199)
             path = shlex.quote(str(args["path"]))
-            return f"test -f {path} && nl -ba -- {path} | sed -n '{start},{end}p' || echo 'Error: file not found'"
+            return (
+                f"if [ -f {path} ]; then nl -ba -- {path} | sed -n '{start},{end}p'; "
+                f"elif [ -d {path} ]; then echo 'Error:' {path} 'is a directory, not a file. Its contents:'; "
+                f"ls -la -- {path}; exit 1; "
+                f"else echo 'Error:' {path} 'does not exist. Contents of its parent directory:'; "
+                f"ls -la -- \"$(dirname -- {path})\" 2>/dev/null | head -50; exit 1; fi"
+            )
         if name == "edit_file":
             payload = {k: str(args[k]) for k in ("path", "old_str", "new_str")}
             encoded = base64.b64encode(json.dumps(payload).encode()).decode()

@@ -99,3 +99,27 @@ async def test_null_extra_body_key_is_dropped():
     cfg = HarnessConfig(extra_body={"chat_template_kwargs": None, "seed": 1})
     await run_agent("t", FakeExecutor(), llm, cfg, Tracer(None, {}))
     assert llm.requests[0]["extra_body"] == {"seed": 1}
+
+
+async def test_repeat_guard_warns_on_identical_calls():
+    same = json.dumps({"command": "find /app -name x.py"})
+    reordered = json.dumps({"command": "find /app -name x.py"}, indent=2)
+    script = [("", [ToolCall("a", "bash", same)]), ("", [ToolCall("b", "bash", reordered)]), ("", [SUBMIT])]
+    llm = ScriptedLLM(script)
+    tracer = Tracer(None, {})
+    result = await run_agent("t", FakeExecutor("nothing"), llm, HarnessConfig(repeat_warning_after=2), tracer)
+
+    tool_messages = [m["content"] for m in llm.requests[-1]["messages"] if m["role"] == "tool"]
+    assert "[harness]" not in tool_messages[0]
+    assert "made this exact `bash` call 2 times" in tool_messages[1]
+    assert result.totals.repeat_warnings == 1
+    assert [r["repeat_count"] for r in tracer.records if r["type"] == "tool_call"] == [1, 2, 1]
+
+
+async def test_repeat_guard_can_be_disabled():
+    call = json.dumps({"command": "ls"})
+    script = [("", [ToolCall("a", "bash", call)]), ("", [ToolCall("b", "bash", call)]), ("", [SUBMIT])]
+    llm = ScriptedLLM(script)
+    result = await run_agent("t", FakeExecutor(), llm, HarnessConfig(repeat_warning_after=0), Tracer(None, {}))
+    assert result.totals.repeat_warnings == 0
+    assert not any("[harness]" in m.get("content", "") for m in llm.requests[-1]["messages"])

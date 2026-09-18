@@ -29,6 +29,9 @@ class HarnessConfig:
     max_context_tokens: int = 30_000
     max_format_errors: int = 3
     command_timeout_sec: int = 60
+    # Warn the model when it makes the same tool call (same name and arguments) for the
+    # Nth time. Small models otherwise loop on one command until the step limit. 0 = off.
+    repeat_warning_after: int = 2
 
     # --- strategy parameters ------------------------------------------------
     obs_hard_cap_chars: int = 16_000  # applies to every strategy, as a safety net

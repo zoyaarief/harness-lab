@@ -7,7 +7,7 @@
 #
 #   scripts/run_matrix.sh                                   # defaults below
 #   VARIANTS="full bash-only" TRIALS=3 PREFIX=tools scripts/run_matrix.sh
-#   MODEL=nvidia/qwen/qwen3-coder-480b-a35b-instruct PREFIX=nim CONCURRENCY=2 scripts/run_matrix.sh
+#   MODEL=nvidia/nvidia/nemotron-3-super-120b-a12b CONFIG_DIR=configs/nim PREFIX=nim TRIALS=1 scripts/run_matrix.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,12 +16,14 @@ TASKS="${TASKS:-tasks/py-bugfix-lite}"
 VARIANTS="${VARIANTS:-full truncate rolling compaction}"
 TRIALS="${TRIALS:-2}"
 PREFIX="${PREFIX:-exp}"
+CONFIG_DIR="${CONFIG_DIR:-configs}"
 # Keep 1 for the local server: it has one slot, so extra requests would just queue
 # and inflate TTFT.
 CONCURRENCY="${CONCURRENCY:-1}"
 
-env_args=()
-[[ -f .env ]] && env_args=(--env-file .env)
+# A plain string, not an array: bash 3.2 (macOS) trips over empty arrays under `set -u`.
+env_file_args=""
+[[ -f .env ]] && env_file_args="--env-file .env"
 
 finished() {
   [[ -f "jobs/$1/result.json" ]] &&
@@ -40,10 +42,10 @@ for trial in $(seq 1 "$TRIALS"); do
       -p "$TASKS" \
       -a harness_lab.harbor_agent:HarnessLabAgent \
       -m "$MODEL" \
-      --ak "config=configs/${variant}.yaml" \
+      --ak "config=${CONFIG_DIR}/${variant}.yaml" \
       -n "$CONCURRENCY" \
       --job-name "$job" \
-      -y -q "${env_args[@]}" ${EXTRA_ARGS:-}
+      -y -q ${env_file_args} ${EXTRA_ARGS:-}
   done
 done
 echo "=== done $(date '+%H:%M:%S')"

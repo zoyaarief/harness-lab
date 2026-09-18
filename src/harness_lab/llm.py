@@ -24,6 +24,10 @@ class ContextOverflowError(Exception):
     """The prompt no longer fits in the model's context window."""
 
 
+class RetryableStreamError(Exception):
+    """The server reported a transient failure (overload, rate limit) inside the stream."""
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -89,6 +93,7 @@ def _percentile(values: list[float], pct: float) -> float:
 
 class LLMClient:
     RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    RETRYABLE_MARKERS = ("overloaded", "unavailable", "rate limit", "rate_limit", "try again")
 
     def __init__(
         self,
@@ -96,7 +101,7 @@ class LLMClient:
         model: str,
         api_key: str | None = None,
         timeout_sec: float = 600.0,
-        max_retries: int = 4,
+        max_retries: int = 5,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.url = base_url.rstrip("/") + "/chat/completions"
@@ -140,7 +145,7 @@ class LLMClient:
                 status = exc.response.status_code
                 if status not in self.RETRYABLE_STATUS or attempt == self.max_retries:
                     raise
-            except (httpx.TransportError, httpx.RemoteProtocolError):
+            except (httpx.TransportError, httpx.RemoteProtocolError, RetryableStreamError):
                 if attempt == self.max_retries:
                     raise
             await asyncio.sleep(min(60, 2 ** (attempt + 1)))
@@ -174,6 +179,11 @@ class LLMClient:
                         message = json.dumps(chunk["error"])
                         if _looks_like_overflow(message):
                             raise ContextOverflowError(message[:500])
+                        error = chunk["error"] if isinstance(chunk["error"], dict) else {}
+                        if error.get("code") in self.RETRYABLE_STATUS or any(
+                            m in message.lower() for m in self.RETRYABLE_MARKERS
+                        ):
+                            raise RetryableStreamError(message[:500])
                         raise RuntimeError(f"Streaming error from server: {message[:500]}")
 
                     for choice in chunk.get("choices") or []:
