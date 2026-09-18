@@ -23,7 +23,8 @@ from matplotlib.path import Path as MplPath  # noqa: E402
 from matplotlib.patches import PathPatch  # noqa: E402
 
 BASELINE = "full"
-VARIANT_ORDER = ["full", "truncate", "rolling", "compaction", "bash-only", "reasoning"]
+SUSPEND_GAP_S = 600
+VARIANT_ORDER = ["full", "truncate", "rolling", "compaction", "no-repeat-guard", "bash-only", "reasoning"]
 
 # --------------------------------------------------------------------------- loading
 
@@ -41,6 +42,8 @@ def load(job_dirs: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
             end = next((r for r in reversed(records) if r["type"] == "run_end"), {})
             llm = [r for r in records if r["type"] == "llm_call"]
             rewards = (result.get("verifier_result") or {}).get("rewards") or {}
+            walls = [r["wall"] for r in records if "wall" in r]
+            max_gap = max((b - a for a, b in zip(walls, walls[1:])), default=0.0)
             trial = {
                 "job": job.name,
                 "trial": result["trial_name"],
@@ -60,13 +63,18 @@ def load(job_dirs: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 "decode_s": sum(max(0.0, r["e2e_ms"] - _prefill_ms(r)) for r in llm) / 1000,
                 "tool_s": sum(r["duration_ms"] for r in records if r["type"] == "tool_call") / 1000,
                 "compactions": end.get("compactions", 0),
+                "repeat_warnings": end.get("repeat_warnings", 0),
                 "format_errors": end.get("format_errors", 0),
                 "tool_errors": end.get("tool_errors", 0),
                 "agent_wall_s": _seconds(result.get("agent_execution")),
+                # A long silence between trace records means the machine slept mid-run;
+                # such trials keep their reward and token counts but are left out of timing stats.
+                "suspended": max_gap > SUSPEND_GAP_S,
             }
             trials.append(trial)
             for r in llm:
-                calls.append({"trial": trial["trial"], "task": trial["task"], "variant": trial["variant"], **r})
+                calls.append({"trial": trial["trial"], "task": trial["task"], "variant": trial["variant"],
+                              "suspended": trial["suspended"], **r})
     return pd.DataFrame(trials), pd.DataFrame(calls)
 
 
@@ -118,7 +126,8 @@ def summarize(trials: pd.DataFrame, calls: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for variant in ordered_variants(trials):
         t = trials[trials.variant == variant]
-        c = calls[(calls.variant == variant) & (calls.kind == "agent")]
+        timed = t[~t.suspended]
+        c = calls[(calls.variant == variant) & (calls.kind == "agent") & ~calls.suspended]
         passed = int((t.reward >= 1).sum())
         lo, hi = wilson(passed, len(t))
         rows.append(
@@ -137,7 +146,8 @@ def summarize(trials: pd.DataFrame, calls: pd.DataFrame) -> pd.DataFrame:
                 "ttft_p50_s": c.ttft_ms.quantile(0.5) / 1000,
                 "ttft_p90_s": c.ttft_ms.quantile(0.9) / 1000,
                 "decode_ms_per_token": c.server_decode_ms_per_token.median(),
-                "median_task_wall_s": t.agent_wall_s.median(),
+                "median_task_wall_s": timed.agent_wall_s.median(),
+                "suspended_trials": int(t.suspended.sum()),
                 "compactions_per_task": t.compactions.mean(),
             }
         )
@@ -165,6 +175,10 @@ def write_markdown(summary: pd.DataFrame, trials: pd.DataFrame, path: Path) -> N
         if res:
             mean, lo, hi, n = res
             lines.append(f"- `{variant}`: {mean:+.0%} ({lo:+.0%} to {hi:+.0%}), {n} tasks")
+    suspended = int(trials.suspended.sum())
+    if suspended:
+        lines += ["", f"{suspended} trial(s) were interrupted by system sleep; they count toward pass rates "
+                  "and token totals but are excluded from all timing columns and charts."]
     stops = trials.groupby(["variant", "stop_reason"]).size().unstack(fill_value=0)
     lines += ["", "Stop reasons:", "", stops.to_markdown()]
     path.write_text("\n".join(lines) + "\n")
@@ -181,7 +195,7 @@ THEMES = {
         "muted": "#898781",
         "grid": "#e1e0d9",
         "axis": "#c3c2b7",
-        "series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"],
+        "series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
     },
     "dark": {
         "surface": "#1a1a19",
@@ -190,7 +204,7 @@ THEMES = {
         "muted": "#898781",
         "grid": "#2c2c2a",
         "axis": "#383835",
-        "series": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"],
+        "series": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
     },
 }
 DPI = 200
@@ -282,8 +296,10 @@ def chart_pass_rate(summary: pd.DataFrame, theme: dict, out: Path, mode: str) ->
     n = len(summary)
     height = 0.9 + 0.45 * n
     fig, (ax,) = new_figure(theme, 7, height)
-    fig.subplots_adjust(left=0.16, right=0.93, top=1 - 0.55 / height, bottom=0.4 / height)
-    ax.set_xlim(0, 1)
+    fig.subplots_adjust(left=0.16, right=0.97, top=1 - 0.55 / height, bottom=0.4 / height)
+    ax.set_xlim(0, 1.2)  # room for the value labels past 100%
+    ax.set_xticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.spines["bottom"].set_bounds(0, 1)
     ax.set_ylim(n - 0.5, -0.5)
     grid(ax, theme, "x")
     h = bar_height(ax, n)
@@ -297,7 +313,7 @@ def chart_pass_rate(summary: pd.DataFrame, theme: dict, out: Path, mode: str) ->
                 color=theme["secondary"], fontsize=8)
     ax.set_yticks(range(n), summary.variant)
     ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0))
-    ax.set_title("Task pass rate by harness variant (whiskers: 95% Wilson CI)", loc="left", pad=10)
+    ax.set_title("Task pass rate by harness variant (whiskers: 95% Wilson CI)", loc="left", pad=10, color=theme["primary"])
     save(fig, out, "pass_rate", mode)
 
 
@@ -321,7 +337,7 @@ def chart_context_growth(calls: pd.DataFrame, variants: list[str], theme: dict, 
     ax.set_xlabel("Agent step")
     ax.set_ylabel("Prompt tokens (median)")
     legend(ax, theme, [h for h, _ in handles], [v for _, v in handles], ncol=len(handles))
-    ax.set_title("How the prompt grows each step", loc="left", pad=28)
+    ax.set_title("How the prompt grows each step (median over runs still active at that step)", loc="left", pad=28, color=theme["primary"])
     save(fig, out, "context_growth", mode)
 
 
@@ -372,20 +388,25 @@ def chart_stacked(summary_rows: list[tuple[str, list[float]]], segments: list[st
     ax.set_yticks(range(n), [label for label, _ in summary_rows])
     ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, _: unit_fmt(x)))
     legend(ax, theme, [swatch(theme["series"][k]) for k in range(len(segments))], segments, ncol=len(segments))
-    ax.set_title(title, loc="left", pad=26)
+    ax.set_title(title, loc="left", pad=26, color=theme["primary"])
     save(fig, out, name, mode)
 
 
 def render_charts(trials: pd.DataFrame, calls: pd.DataFrame, summary: pd.DataFrame, out: Path) -> None:
     variants = ordered_variants(trials)
-    means = trials.groupby("variant")[["prefill_s", "decode_s", "tool_s", "prefill_computed", "cached_tokens"]].mean()
+    calls = calls[~calls.suspended]
+    timed = trials[~trials.suspended]
+    means = timed.groupby("variant")[["prefill_s", "decode_s", "tool_s"]].mean().join(
+        trials.groupby("variant")[["prefill_computed", "cached_tokens"]].mean()
+    )
+    means = means.reindex(variants).fillna(0.0)
     time_rows = [(v, [means.at[v, "prefill_s"], means.at[v, "decode_s"], means.at[v, "tool_s"]]) for v in variants]
     token_rows = [(v, [means.at[v, "prefill_computed"], means.at[v, "cached_tokens"]]) for v in variants]
     for mode, theme in THEMES.items():
         chart_pass_rate(summary, theme, out, mode)
         chart_context_growth(calls, variants, theme, out, mode)
         chart_ttft(calls, theme, out, mode)
-        chart_stacked(time_rows, ["Prefill (model reads prompt)", "Decode (model writes)", "Tool execution"],
+        chart_stacked(time_rows, ["Time to first token (prefill)", "Generating output (decode)", "Tool execution"],
                       "Where the time goes: mean seconds per task", lambda x: f"{x:,.0f} s",
                       theme, out, "time_breakdown", mode)
         chart_stacked(token_rows, ["Prompt tokens computed", "Prompt tokens served from cache"],
